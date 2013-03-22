@@ -36,6 +36,11 @@
 #include <plat/omap_apps_brd_id.h>
 
 #include <plat/board-backlight.h>
+
+#if defined (CONFIG_BACKLIGHT_LP855X)
+#include <linux/lp855x.h>
+#endif
+
 #include "board-bowser.h"
 
 #include "control.h"
@@ -67,6 +72,13 @@
 #define GPIO_LCD_ENABLE               35  /* enabling LCD panel */
 #define GPIO_D2L_RESET                40  /* D2L reset gpio */
 
+#if defined (CONFIG_BACKLIGHT_LP855X)
+#define GPIO_BACKLIGHT_EN_LP855X	(25)	/*Enable LP855x backlight*/
+#define INITIAL_BRT			(0x64)
+#define MAX_BRT				(0xFF)
+#endif
+
+
 #if defined (CONFIG_MACH_OMAP4_BOWSER_SUBTYPE_TATE)
 #define GPIO_BACKLIGHT_CABC_EN        37  /* enabling backlight CABC (Content Adaptive Backlight Control) */
 #endif
@@ -80,16 +92,19 @@ static struct gpio tablet_hdmi_gpios[] = {
 static struct panel_board_data bowser_dsi_panel = {
 		.lcd_en_gpio = GPIO_LCD_ENABLE,
 		.reset_gpio	= GPIO_D2L_RESET,
+		.cabc_en_gpio = -1,
 };
 #elif defined (CONFIG_PANEL_NT71391_HYDIS)
 static struct panel_board_data bowser_dsi_panel = {
 		.lcd_en_gpio = GPIO_LCD_ENABLE,
 		.reset_gpio = -1,
+		.cabc_en_gpio = -1,
 };
 #elif defined (CONFIG_PANEL_NT51012_LG)
 static struct panel_board_data bowser_dsi_panel = {
 		.lcd_en_gpio = GPIO_LCD_ENABLE,
 		.reset_gpio = -1,
+		.cabc_en_gpio = GPIO_BACKLIGHT_CABC_EN,
 };
 #endif
 
@@ -257,8 +272,16 @@ static struct omap_dss_device bowser_lcd_device = {
 
 		.type = OMAP_DSS_DSI_TYPE_VIDEO_MODE,
 	},
-
-#error Need .panel timings, width & height_in_um
+	.panel = {
+		.acbi = 0,
+		.acb = 40,
+		.timings = {
+			.x_res = 800,
+			.y_res = 1280,
+		},
+		.width_in_um = 94200,
+		.height_in_um = 150720,
+	},
 
 	.clocks = {
 		.dispc = {
@@ -271,18 +294,22 @@ static struct omap_dss_device bowser_lcd_device = {
 		},
 
 		.dsi = {
-			.regn           = 38,	/* DSI_PLL_REGN */
-			.regm           = 394,	/* DSI_PLL_REGM */
+			.regn           = 16,	/* DSI_PLL_REGN */
+			.regm           = 178,	/* DSI_PLL_REGM */
 			.regm_dispc     = 6,	/* PLL_CLK1 (M4) */
-			.regm_dsi       = 9,	/* PLL_CLK2 (M5) */
-			.lp_clk_div     = 5,	/* PLDIV */
+			.regm_dsi       = 5,	/* PLL_CLK2 (M5) */
+			.lp_clk_div     = 9,	/* PLDIV */
 			.offset_ddr_clk = 0,
 			.dsi_fclk_src   = OMAP_DSS_CLK_SRC_DSI_PLL_HSDIV_DSI,
 		},
 	},
 
 	.channel = OMAP_DSS_CHANNEL_LCD,
+#ifdef CONFIG_FB_OMAP_BOOTLOADER_INIT
+	.skip_init = true,
+#else
 	.skip_init = false,
+#endif
 
 	.platform_enable = NULL,
 	.platform_disable = NULL,
@@ -323,6 +350,33 @@ static struct omapfb_platform_data bowser_fb_pdata = {
 	},
 };
 
+#if defined (CONFIG_BACKLIGHT_LP855X)
+static struct lp855x_rom_data lp8552_eeprom_arr[] = {
+	{0xa1, 0xf0}, /* SLOPE=0 */
+	{0xa5, 0x4f}, /* EN_VSYNC=0 */
+};
+
+static struct lp855x_platform_data lp8552_pdata = {
+	.name = "lcd-backlight",
+	.mode = REGISTER_BASED,
+	.device_control = I2C_CONFIG(LP8552),
+	.initial_brightness = INITIAL_BRT,
+	.max_brightness = MAX_BRT,
+	.load_new_rom_data = 1,
+	.size_program = ARRAY_SIZE(lp8552_eeprom_arr),
+	.rom_data = lp8552_eeprom_arr,
+	.gpio_en = GPIO_BACKLIGHT_EN_LP855X,
+};
+
+static struct i2c_board_info __initdata bl_i2c_boardinfo[] = {
+	{
+	 I2C_BOARD_INFO("lp8552", 0x2C),
+	 .platform_data = &lp8552_pdata,
+	},
+};
+
+#else	/*CONFIG_BACKLIGHT_LP855X*/
+
 static struct bowser_backlight_platform_data bowser_backlight_data = {
 	.gpio_en_o2m = GPIO_BACKLIGHT_EN_O2M,
 	.gpio_vol_o2m = GPIO_BACKLIGHT_VOL_O2M,
@@ -355,6 +409,8 @@ static struct platform_device bowser_backlight_device = {
 static struct platform_device *bowser_devices[] __initdata = {
 	&bowser_backlight_device,
 };
+
+#endif  /*CONFIG_BACKLIGHT_LP855X*/
 
 //Allocate 27 MB for TILER1D slot size for WUXGA panel on JEM, total of 54 MB of TILER1D
 static struct dsscomp_platform_data dsscomp_config_wuxga = {
@@ -455,8 +511,15 @@ static void bowser_lcd_init(void)
 			pr_err("%s: lcd_en_gpio request failed\n", __func__);
 			bowser_dsi_panel.lcd_en_gpio = -1;
 		}
-
+#if defined (CONFIG_MACH_OMAP4_BOWSER_SUBTYPE_TATE)
+#ifdef CONFIG_FB_OMAP_BOOTLOADER_INIT
 		gpio_direction_output(bowser_dsi_panel.lcd_en_gpio, 1);
+#else
+		gpio_direction_output(bowser_dsi_panel.lcd_en_gpio, 0);
+#endif
+#else
+		gpio_direction_output(bowser_dsi_panel.lcd_en_gpio, 1);
+#endif
 		printk("LCD_EN_GPIO success\n");
 	}
 
@@ -473,6 +536,15 @@ static void bowser_lcd_init(void)
 	}
 }
 
+#if defined (CONFIG_BACKLIGHT_LP855X)
+static void lp855x_backlight_init(void)
+{
+	omap_mux_init_gpio(GPIO_BACKLIGHT_EN_LP855X, OMAP_PIN_OUTPUT);
+	i2c_register_board_info(2, bl_i2c_boardinfo,
+				ARRAY_SIZE(bl_i2c_boardinfo));
+}
+
+#else /*CONFIG_BACKLIGHT_LP855X*/
 static void bowser_backlight_init(void)
 {
 	/* backlight gpio */
@@ -485,7 +557,7 @@ static void bowser_backlight_init(void)
                omap_mux_init_gpio(GPIO_BACKLIGHT_CABC_EN, OMAP_PIN_OUTPUT); 
 #endif
 }
-
+#endif  /*CONFIG_BACKLIGHT_LP855X*/
 
 void bowser_android_display_setup(struct omap_ion_platform_data *ion)
 {
@@ -498,14 +570,19 @@ void bowser_android_display_setup(struct omap_ion_platform_data *ion)
 
 int __init bowser_panel_init(void)
 {
+#if defined (CONFIG_BACKLIGHT_LP855X)
+	lp855x_backlight_init();
+#else
 	bowser_backlight_init();
+#endif
 	bowser_lcd_init();
 	tablet_hdmi_mux_init();
 
 	omapfb_set_platform_data(&bowser_fb_pdata);
 
 	omap_display_init(&bowser_dss_data);
+#if defined (CONFIG_BACKLIGHT_BOWSER)
 	platform_add_devices(bowser_devices, ARRAY_SIZE(bowser_devices));
-
+#endif
 	return 0;
 }
