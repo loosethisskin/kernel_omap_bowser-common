@@ -320,6 +320,8 @@ static inline int omap_display_init(struct omap_dss_board_info *board_data)
 struct omap_display_platform_data {
 	struct omap_dss_board_info *board_data;
 	/* TODO: Additional members to be added when PM is considered */
+	int (*device_scale) (struct device *req_dev, struct device *target_dev,
+			unsigned long rate);
 };
 
 struct omap_video_timings {
@@ -767,6 +769,7 @@ struct omap_dss_driver {
 	/* for wrapping around state changes */
 	void (*disable_orig)(struct omap_dss_device *display);
 	int (*enable_orig)(struct omap_dss_device *display);
+	int (*suspend_orig)(struct omap_dss_device *display);
 };
 
 int omap_dss_register_driver(struct omap_dss_driver *);
@@ -790,8 +793,6 @@ struct omap_overlay_manager *omap_dss_get_overlay_manager(int num);
 int omap_dss_get_num_overlays(void);
 struct omap_overlay *omap_dss_get_overlay(int num);
 struct omap_writeback *omap_dss_get_wb(int num);
-
-bool omap_dss_overlay_ensure_bw(void);
 
 void omapdss_default_get_resolution(struct omap_dss_device *dssdev,
 		u16 *xres, u16 *yres);
@@ -869,6 +870,7 @@ static inline void dss_ovl_cb(struct omapdss_ovl_cb *cb, int id, int status)
 }
 void omapdss_hdmi_get_audio_descriptors(struct hdmi_audio_edid *audio_db);
 
-int dss_set_min_bus_tput(unsigned long tput);
+#ifdef CONFIG_MACH_OMAP4_BOWSER_SUBTYPE_JEM
 int dss_set_dispc_clk(unsigned long freq);
+#endif
 #endif

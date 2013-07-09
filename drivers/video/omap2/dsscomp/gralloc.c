@@ -1,3 +1,23 @@
+/*
+ * linux/drivers/video/omap2/dsscomp/gralloc.c
+ *
+ * Graphics Memory Allocator
+ *
+ * Copyright (C) 2012 Texas Instruments, Inc
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published by
+ * the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ * more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
@@ -142,6 +162,9 @@ int dsscomp_gralloc_queue_ioctl(struct dsscomp_setup_dispc_data *d)
 	struct tiler_pa_info *pas[MAX_OVERLAYS];
 	s32 ret;
 	u32 i;
+
+	if (d->num_ovls > MAX_OVERLAYS)
+		return -EINVAL;
 
 	/* convert virtual addresses to physical and get tiler pa infos */
 	for (i = 0; i < d->num_ovls; i++) {

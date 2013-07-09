@@ -32,15 +32,15 @@
 #include <linux/io.h>
 #include <linux/device.h>
 #include <linux/regulator/consumer.h>
+#include <plat/omap_hwmod.h>
+#include <plat/omap-pm.h>
 
 #include <video/omapdss.h>
 
-#ifndef CONFIG_MACH_OMAP4_BOWSER_SUBTYPE_TATE
-#ifdef CONFIG_FB_OMAP_BOOTLOADER_INIT
+#ifdef CONFIG_MACH_OMAP4_BOWSER_SUBTYPE_JEM
 #include <linux/clk.h>
 #include <plat/clock.h>
 #include <linux/delay.h>
-#endif /* CONFIG_FB_OMAP_BOOTLOADER_INIT */
 #endif
 
 #include "dss.h"
@@ -95,18 +95,7 @@ struct regulator *dss_get_vdds_sdi(void)
 	return reg;
 }
 
-int dss_set_min_bus_tput(unsigned long tput)
-{
-	struct omap_dss_board_info *pdata = core.pdev->dev.platform_data;
-
-	if (pdata->set_min_bus_tput)
-		return pdata->set_min_bus_tput(&core.pdev->dev, tput);
-	else {
-		DSSERR("Unable to get set_min_bus_tput pointer\n");
-		return -EINVAL;
-	}
-}
-
+#ifdef CONFIG_MACH_OMAP4_BOWSER_SUBTYPE_JEM
 int dss_set_dispc_clk(unsigned long freq)
 {
 	struct clk *clk;
@@ -125,6 +114,7 @@ int dss_set_dispc_clk(unsigned long freq)
 	}
 	return 0;
 }
+#endif
 
 #if defined(CONFIG_DEBUG_FS) && defined(CONFIG_OMAP2_DSS_DEBUG_SUPPORT)
 static int dss_debug_show(struct seq_file *s, void *unused)
@@ -204,6 +194,33 @@ static inline void dss_uninitialize_debugfs(void)
 }
 #endif /* CONFIG_DEBUG_FS && CONFIG_OMAP2_DSS_DEBUG_SUPPORT */
 
+/*
+ * The value of HIGH_RES_TPUT corresponds to one dispc pipe layer of
+ * 1920x1080x4(bpp)x60(Hz) = ~500000(MiB/s). We add another 100000
+ * for the other partial screen pipes. This is above the threshold for
+ * selecting the higher OPP and L3 frequency, so it's "as fast" as we
+ * can go so covers the higest supported resolution.
+ */
+#define HIGH_RES_TPUT 600000 /* MiB/s */
+void omap_dss_request_high_bandwidth(struct device *dss_dev)
+{
+	if (IS_ERR_OR_NULL(dss_dev))
+		DSSERR("%s: wrong dss_dev pointer\n", __func__);
+	else if (!omap_pm_set_min_bus_tput(dss_dev,
+					OCP_INITIATOR_AGENT, HIGH_RES_TPUT))
+		return;
+	DSSDBG("Failed to set high L3 bus speed\n");
+}
+
+void omap_dss_reset_high_bandwidth(struct device *dss_dev)
+{
+	if (IS_ERR_OR_NULL(dss_dev))
+		DSSERR("%s: wrong dss_dev pointer\n", __func__);
+	else if (!omap_pm_set_min_bus_tput(dss_dev, OCP_INITIATOR_AGENT, -1))
+		return;
+	DSSDBG("Failed to reset high L3 bus speed\n");
+}
+
 /* PLATFORM DEVICE */
 static int omap_dss_probe(struct platform_device *pdev)
 {
@@ -211,11 +228,9 @@ static int omap_dss_probe(struct platform_device *pdev)
 	int r;
 	int i;
 
-#ifndef CONFIG_MACH_OMAP4_BOWSER_SUBTYPE_TATE
-#ifdef CONFIG_FB_OMAP_BOOTLOADER_INIT
+#ifdef CONFIG_MACH_OMAP4_BOWSER_SUBTYPE_JEM
 	static int first_boot = 1;
 	struct clk *iclk;
-#endif /* CONFIG_FB_OMAP_BOOTLOADER_INIT */
 #endif
 
 	core.pdev = pdev;
@@ -286,8 +301,7 @@ static int omap_dss_probe(struct platform_device *pdev)
 		}
 	}
 
-#ifndef CONFIG_MACH_OMAP4_BOWSER_SUBTYPE_TATE
-#ifdef CONFIG_FB_OMAP_BOOTLOADER_INIT
+#ifdef CONFIG_MACH_OMAP4_BOWSER_SUBTYPE_JEM
 	if (unlikely(first_boot != 0)) {
 		iclk = clk_get(NULL, "ick");
 		if (!IS_ERR(iclk)) {
@@ -296,7 +310,6 @@ static int omap_dss_probe(struct platform_device *pdev)
 		}
 		first_boot = 0;
 	}
-#endif /* CONFIG_FB_OMAP_BOOTLOADER_INIT */
 #endif
 
 	return 0;
@@ -496,10 +509,17 @@ static void omap_dss_driver_disable(struct omap_dss_device *dssdev)
 
 static int omap_dss_driver_enable(struct omap_dss_device *dssdev)
 {
-	int r = dssdev->driver->enable_orig(dssdev);
+	int r;
+	r = dssdev->driver->enable_orig(dssdev);
 	if (!r && dssdev->state == OMAP_DSS_DISPLAY_ACTIVE)
 		blocking_notifier_call_chain(&dssdev->state_notifiers,
 					OMAP_DSS_DISPLAY_ACTIVE, dssdev);
+	return r;
+}
+
+static int omap_dss_driver_suspend(struct omap_dss_device *dssdev)
+{
+	int r = dssdev->driver->suspend_orig(dssdev);
 	return r;
 }
 
@@ -519,6 +539,9 @@ int omap_dss_register_driver(struct omap_dss_driver *dssdriver)
 	dssdriver->disable = omap_dss_driver_disable;
 	dssdriver->enable_orig = dssdriver->enable;
 	dssdriver->enable = omap_dss_driver_enable;
+
+	dssdriver->suspend_orig = dssdriver->suspend;
+	dssdriver->suspend = omap_dss_driver_suspend;
 
 	return driver_register(&dssdriver->driver);
 }
