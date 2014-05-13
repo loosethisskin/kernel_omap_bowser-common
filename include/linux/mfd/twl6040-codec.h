@@ -217,6 +217,7 @@
 #define TWL6040_HFROCDET		0x08
 #define TWL6040_VIBLOCDET		0x10
 #define TWL6040_VIBROCDET		0x20
+#define TWL6040_TSHUTDET		0x40
 
 #define TWL6040_CELLS			2
 
@@ -228,6 +229,12 @@
 #define TWL6040_IRQ_HF			3
 #define TWL6040_IRQ_VIB			4
 #define TWL6040_IRQ_READY		5
+
+/* Event IDs for Android userspace */
+#define TWL6040_THSHUT_EVENT		1
+#define TWL6040_THSHUT_RECOVERY		2
+#define TWL6040_HFOC_EVENT		3
+#define TWL6040_VIBOC_EVENT		4
 
 enum twl6040_pll_id {
 	TWL6040_NOPLL_ID,
@@ -246,10 +253,12 @@ struct twl6040 {
 	int audpwron;
 	int powered;
 	int power_count;
+	int thshut;
 
 	enum twl6040_pll_id pll;
 	unsigned int sysclk;
 	int icrev;
+	u8 cache[TWL6040_CACHEREGNUM];
 
 	unsigned int irq;
 	unsigned int irq_base;
@@ -293,6 +302,10 @@ int twl6040_set_pll(struct twl6040 *twl6040, enum twl6040_pll_id id,
 enum twl6040_pll_id twl6040_get_pll(struct twl6040 *twl6040);
 unsigned int twl6040_get_sysclk(struct twl6040 *twl6040);
 int twl6040_get_icrev(struct twl6040 *twl6040);
+void twl6040_report_event(struct twl6040 *twl6040, int event);
+int twl6040_get_reg_supply(unsigned int reg);
+int twl6040_reg_is_vdd(unsigned int reg);
+int twl6040_reg_is_vio(unsigned int reg);
 int twl6040_irq_init(struct twl6040 *twl6040);
 void twl6040_irq_exit(struct twl6040 *twl6040);
 
