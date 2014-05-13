@@ -640,13 +640,14 @@ struct twl4030_bci_platform_data {
 	unsigned int max_bat_voltagemV;
 	unsigned int low_bat_voltagemV;
 
+	unsigned int sense_resistor_mohm;
+
 	/* twl6032 */
-	unsigned int use_hw_charger;
-	unsigned int use_power_path;
 	unsigned long features;
-	unsigned int use_eeprom_config;
 
 	unsigned long errata;
+
+	struct cell_config *cell_cfg;
 };
 
 /* TWL4030_GPIO_MAX (18) GPIOs, with interrupts */
@@ -708,8 +709,6 @@ struct twl4030_usb_data {
 	int		(*phy_exit)(struct device *dev);
 	/* Power on/off the PHY */
 	int		(*phy_power)(struct device *dev, int iD, int on);
-	/* enable/disable  phy clocks */
-	int		(*phy_set_clock)(struct device *dev, int on);
 	/* suspend/resume of phy */
 	int		(*phy_suspend)(struct device *dev, int suspend);
 };
@@ -980,5 +979,7 @@ static inline int twl4030charger_usb_en(int enable) { return 0; }
 #define TWL6032_PREQ1_RES_ASS_A	0xd7
 
 #define TWL6032_ERRATA_DB00119490	(1 << 0)
+#define TWL6030_ERRATA_DB00112620	(1 << 1)
+#define TWL6030_ERRATA_DB00110684	(1 << 2)
 
 #endif /* End of __TWL4030_H */
