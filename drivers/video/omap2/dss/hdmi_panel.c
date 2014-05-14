@@ -174,9 +174,6 @@ static struct attribute *hdmi_panel_attrs[] = {
 	&dev_attr_s3d_type.attr,
 	&dev_attr_edid.attr,
 	&dev_attr_deepcolor.attr,
-#ifdef CONFIG_HDMI_CERT_DEBUG
-	&dev_attr_hdmi_timings,
-#endif
 	&dev_attr_audio_channels.attr,
 	NULL,
 };
@@ -241,6 +238,8 @@ static int hdmi_panel_enable(struct omap_dss_device *dssdev)
 		goto err;
 	}
 
+	dssdev->state = OMAP_DSS_DISPLAY_ACTIVE;
+	hdmi_inform_power_on_to_cec(true);
 err:
 	mutex_unlock(&hdmi.hdmi_lock);
 
@@ -250,7 +249,7 @@ err:
 static void hdmi_panel_disable(struct omap_dss_device *dssdev)
 {
 	mutex_lock(&hdmi.hdmi_lock);
-
+	hdmi_inform_power_on_to_cec(false);
 	if (dssdev->state == OMAP_DSS_DISPLAY_ACTIVE)
 		omapdss_hdmi_display_disable(dssdev);
 
@@ -269,7 +268,9 @@ static int hdmi_panel_suspend(struct omap_dss_device *dssdev)
 	mutex_lock(&hdmi.hdmi_lock);
 
 	if (dssdev->state != OMAP_DSS_DISPLAY_ACTIVE) {
-		r = -EINVAL;
+		/* We should enable "resume" event handler for case, when HDMI
+		 * display is plugged in while device was in suspend mode */
+		dssdev->activate_after_resume = true;
 		goto err;
 	}
 
@@ -288,10 +289,8 @@ static int hdmi_panel_resume(struct omap_dss_device *dssdev)
 
 	mutex_lock(&hdmi.hdmi_lock);
 
-	if (dssdev->state != OMAP_DSS_DISPLAY_SUSPENDED) {
-		r = -EINVAL;
+	if (dssdev->state != OMAP_DSS_DISPLAY_SUSPENDED)
 		goto err;
-	}
 
 	dssdev->state = OMAP_DSS_DISPLAY_DISABLED;
 err:
@@ -333,8 +332,7 @@ static void hdmi_hotplug_detect_worker(struct work_struct *work)
 	mutex_lock(&hdmi.hdmi_lock);
 	if (state == HPD_STATE_OFF) {
 		switch_set_state(&hdmi.hpd_switch, 0);
-		/* Clear edid only on unplug */
-		hdmi_set_edid_state(false);
+		hdmi_inform_hpd_to_cec(false);
 		if (dssdev->state == OMAP_DSS_DISPLAY_ACTIVE) {
 			mutex_unlock(&hdmi.hdmi_lock);
 			dssdev->driver->disable(dssdev);
@@ -363,6 +361,7 @@ static void hdmi_hotplug_detect_worker(struct work_struct *work)
 			dssdev->panel.height_in_um =
 					dssdev->panel.monspecs.max_y * 10000;
 			hdmi_audio_update_edid_info();
+			hdmi_inform_hpd_to_cec(true);
 			switch_set_state(&hdmi.hpd_switch, 1);
 			goto done;
 		} else if (state == HPD_STATE_EDID_TRYLAST) {
@@ -457,6 +456,12 @@ static void hdmi_get_resolution(struct omap_dss_device *dssdev,
 	*yres = dssdev->panel.timings.y_res;
 }
 
+static enum omap_dss_update_mode hdmi_get_update_mode(
+		struct omap_dss_device *dssdev)
+{
+	return OMAP_DSS_UPDATE_MANUAL;
+}
+
 static struct omap_dss_driver hdmi_driver = {
 	.probe		= hdmi_panel_probe,
 	.remove		= hdmi_panel_remove,
@@ -470,6 +475,7 @@ static struct omap_dss_driver hdmi_driver = {
 	.get_resolution = hdmi_get_resolution,
 	.get_modedb	= hdmi_get_modedb,
 	.set_mode	= omapdss_hdmi_display_set_mode,
+	.get_update_mode = hdmi_get_update_mode,
 	.driver			= {
 		.name   = "hdmi_panel",
 		.owner  = THIS_MODULE,
