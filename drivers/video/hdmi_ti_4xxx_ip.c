@@ -36,7 +36,10 @@
 #include <linux/clk.h>
 #endif
 #include "hdmi_ti_4xxx_ip.h"
-#include "hdmi_ti_4xxx_ip_ddc.h"
+
+#define CEC_MAX_NUM_OPERANDS   14
+#define HDMI_CORE_CEC_RETRY    200
+#define HDMI_CEC_TX_CMD_RETRY  400
 
 #if defined(CONFIG_OMAP_REMOTE_PROC_IPU) && defined(CONFIG_RPMSG)
 static bool hdmi_acrwa_registered;
@@ -221,6 +224,12 @@ static inline void __iomem *hdmi_core_sys_base(struct hdmi_ip_data *ip_data)
 			(ip_data->base_wp + ip_data->hdmi_core_sys_offset);
 }
 
+static inline void __iomem *hdmi_core_cec_base(struct hdmi_ip_data *ip_data)
+{
+	return (void __iomem *)
+			(ip_data->base_wp + ip_data->hdmi_cec_offset);
+}
+
 static inline int hdmi_wait_for_bit_change(void __iomem *base_addr,
 				const struct hdmi_reg idx,
 				int b2, int b1, u32 val)
@@ -398,7 +407,7 @@ int hdmi_ti_4xxx_pll_program(struct hdmi_ip_data *ip_data,
 	return 0;
 }
 
-int hdmi_ti_4xxx_phy_init(struct hdmi_ip_data *ip_data)
+int hdmi_ti_4xxx_phy_init(struct hdmi_ip_data *ip_data, int phy)
 {
 	u16 r = 0;
 
@@ -421,8 +430,15 @@ int hdmi_ti_4xxx_phy_init(struct hdmi_ip_data *ip_data)
 	 * Write to phy address 0 to configure the clock
 	 * use HFBITCLK write HDMI_TXPHY_TX_CONTROL_FREQOUT field
 	 */
-	/* For radiated emissions testing passing - Per Customer Request */
-	REG_FLD_MOD(hdmi_phy_base(ip_data), HDMI_TXPHY_TX_CTRL, 0x2, 31, 30);
+	if (phy <= 50000)
+		REG_FLD_MOD(hdmi_phy_base(ip_data), HDMI_TXPHY_TX_CTRL, 0x0, 31,
+				30);
+	else if ((50000 < phy) && (phy <= 100000))
+		REG_FLD_MOD(hdmi_phy_base(ip_data), HDMI_TXPHY_TX_CTRL, 0x1, 31,
+				30);
+	else
+		REG_FLD_MOD(hdmi_phy_base(ip_data), HDMI_TXPHY_TX_CTRL, 0x2, 31,
+				30);
 
 	/* Write to phy address 1 to start HDMI line (TXVALID and TMDSCLKEN) */
 	hdmi_write_reg(hdmi_phy_base(ip_data),
@@ -451,7 +467,6 @@ static int hdmi_core_ddc_edid(struct hdmi_ip_data *ip_data,
 	char checksum = 0;
 	u32 offset = 0;
 
-#ifdef USE_LOCAL_DDC_READ
 	/* Turn on CLK for DDC */
 	REG_FLD_MOD(hdmi_av_base(ip_data), HDMI_CORE_AV_DPD, 0x7, 2, 0);
 
@@ -544,35 +559,6 @@ static int hdmi_core_ddc_edid(struct hdmi_ip_data *ip_data,
 			j++;
 		}
 	}
-#else
-	/*
-	 * SW HACK : Without the Delay DDC(i2c bus) reads 0 values /
-	 * right shifted values( The behavior is not consistent and seen only
-	 * with some TV's)
-	 */
-	//msleep(300);  /* Not necessary after the reworked the DDC code */
-
-	if (ext % 2 != 0)
-		 offset = 0x80;
-	{
-		struct mddc mddc;
-		i = ext * 128;
-
-		mddc.slaveAddr  = 0xA0;
-		mddc.offset     = ext/2;
-		mddc.regAddr    = offset;
-		mddc.nbytes_lsb = 0x80;
-		mddc.nbytes_msb = 0x0;
-		mddc.dummy      = 0;
-		mddc.pdata      = &pedid[i];
-		if (ext)
-			mddc.cmd = MASTER_CMD_ENH_RD;
-		else
-			mddc.cmd = MASTER_CMD_SEQ_RD;
-
-		ddc_start_transfer(&mddc, DDC_READ);
-	}
-#endif
 
 	for (j = 0; j < 128; j++)
 		checksum += pedid[j];
@@ -618,9 +604,7 @@ EXPORT_SYMBOL(read_ti_4xxx_edid);
 static void hdmi_core_init(enum hdmi_deep_color_mode deep_color,
 			struct hdmi_core_video_config *video_cfg,
 			struct hdmi_core_infoframe_avi *avi_cfg,
-			struct hdmi_core_packet_enable_repeat *repeat_cfg,
-			struct hdmi_video_format *video_fmt,
-			struct hdmi_video_interface *video_int)
+			struct hdmi_core_packet_enable_repeat *repeat_cfg)
 {
 	pr_debug("Enter hdmi_core_init\n");
 
@@ -631,25 +615,19 @@ static void hdmi_core_init(enum hdmi_deep_color_mode deep_color,
 		video_cfg->op_dither_truc = HDMI_OUTPUTTRUNCATION_10BIT;
 		video_cfg->deep_color_pkt = HDMI_DEEPCOLORPACKECTENABLE;
 		video_cfg->pkt_mode = HDMI_PACKETMODE30BITPERPIXEL;
-		video_fmt->packing_mode = HDMI_PACK_10b_RGB_YUV444;
-		video_int->tm = HDMI_TIMING_MASTER_30BIT;
 		break;
 	case HDMI_DEEP_COLOR_36BIT:
 		video_cfg->ip_bus_width = HDMI_INPUT_12BIT;
 		video_cfg->op_dither_truc = HDMI_OUTPUTTRUNCATION_12BIT;
 		video_cfg->deep_color_pkt = HDMI_DEEPCOLORPACKECTENABLE;
 		video_cfg->pkt_mode = HDMI_PACKETMODE36BITPERPIXEL;
-		video_fmt->packing_mode = HDMI_PACK_ALREADYPACKED;
-		video_int->tm = HDMI_TIMING_MASTER_36BIT;
 		break;
 	case HDMI_DEEP_COLOR_24BIT:
 	default:
 		video_cfg->ip_bus_width = HDMI_INPUT_8BIT;
 		video_cfg->op_dither_truc = HDMI_OUTPUTTRUNCATION_8BIT;
 		video_cfg->deep_color_pkt = HDMI_DEEPCOLORPACKECTDISABLE;
-		video_cfg->pkt_mode = HDMI_PACKETMODE24BITPERPIXEL;
-		video_fmt->packing_mode = HDMI_PACK_24b_RGB_YUV444_YUV422;
-		video_int->tm = HDMI_TIMING_MASTER_24BIT;
+		video_cfg->pkt_mode = HDMI_PACKETMODERESERVEDVALUE;
 		break;
 	}
 
@@ -1029,7 +1007,7 @@ void hdmi_ti_4xxx_basic_configure(struct hdmi_ip_data *ip_data,
 
 	hdmi_core_init(cfg->deep_color, &v_core_cfg,
 		&avi_cfg,
-		&repeat_cfg, &video_format, &video_interface);
+		&repeat_cfg);
 
 	hdmi_wp_core_interrupt_set(ip_data, HDMI_WP_IRQENABLE_CORE |
 				HDMI_WP_AUDIO_FIFO_UNDERFLOW);
@@ -1038,11 +1016,15 @@ void hdmi_ti_4xxx_basic_configure(struct hdmi_ip_data *ip_data,
 
 	hdmi_wp_video_config_timing(ip_data, &video_timing);
 
+	/* video config */
+	video_format.packing_mode = HDMI_PACK_24b_RGB_YUV444_YUV422;
+
 	hdmi_wp_video_config_format(ip_data, &video_format);
 
 	video_interface.vsp = !!(cfg->timings.sync & FB_SYNC_VERT_HIGH_ACT);
 	video_interface.hsp = !!(cfg->timings.sync & FB_SYNC_HOR_HIGH_ACT);
 	video_interface.interlacing = cfg->timings.vmode & FB_VMODE_INTERLACED;
+	video_interface.tm = 1 ; /* HDMI_TIMING_MASTER_24BIT */
 
 	hdmi_wp_video_config_interface(ip_data, &video_interface);
 
@@ -1055,6 +1037,7 @@ void hdmi_ti_4xxx_basic_configure(struct hdmi_ip_data *ip_data,
 	/* power down off */
 	hdmi_core_powerdown_disable(ip_data);
 
+	v_core_cfg.pkt_mode = HDMI_PACKETMODE24BITPERPIXEL;
 	v_core_cfg.hdmi_dvi = cfg->cm.mode;
 
 	hdmi_core_video_config(ip_data, &v_core_cfg);
@@ -1121,7 +1104,7 @@ EXPORT_SYMBOL(hdmi_ti_4xxx_basic_configure);
 u32 hdmi_ti_4xxx_irq_handler(struct hdmi_ip_data *ip_data)
 {
 	u32 val, sys_stat = 0, core_state = 0;
-	u32 intr2 = 0, intr3 = 0, r = 0;
+	u32 intr2 = 0, intr3 = 0, intr4 = 0, r = 0;
 	void __iomem *wp_base = hdmi_wp_base(ip_data);
 	void __iomem *core_base = hdmi_core_sys_base(ip_data);
 
@@ -1135,6 +1118,7 @@ u32 hdmi_ti_4xxx_irq_handler(struct hdmi_ip_data *ip_data)
 						 HDMI_CORE_SYS_SYS_STAT);
 			intr2 = hdmi_read_reg(core_base, HDMI_CORE_SYS_INTR2);
 			intr3 = hdmi_read_reg(core_base, HDMI_CORE_SYS_INTR3);
+			intr4 = hdmi_read_reg(core_base, HDMI_CORE_SYS_INTR4);
 
 			pr_debug("HDMI_CORE_SYS_SYS_STAT = 0x%x\n", sys_stat);
 			pr_debug("HDMI_CORE_SYS_INTR2 = 0x%x\n", intr2);
@@ -1142,6 +1126,7 @@ u32 hdmi_ti_4xxx_irq_handler(struct hdmi_ip_data *ip_data)
 
 			hdmi_write_reg(core_base, HDMI_CORE_SYS_INTR2, intr2);
 			hdmi_write_reg(core_base, HDMI_CORE_SYS_INTR3, intr3);
+			hdmi_write_reg(core_base, HDMI_CORE_SYS_INTR4, intr4);
 
 			hdmi_read_reg(core_base, HDMI_CORE_SYS_INTR2);
 			hdmi_read_reg(core_base, HDMI_CORE_SYS_INTR3);
@@ -1159,6 +1144,9 @@ u32 hdmi_ti_4xxx_irq_handler(struct hdmi_ip_data *ip_data)
 
 	if (intr3 & HDMI_CORE_SYSTEM_INTR3__RI_ERR)
 		r |= HDMI_RI_ERR;
+
+	if (intr4 & HDMI_CORE_SYSTEM_INTR4_CEC)
+		r |= HDMI_CEC_INT;
 
 	/* Ack other interrupts if any */
 	hdmi_write_reg(wp_base, HDMI_WP_IRQSTATUS, val);
@@ -1618,6 +1606,421 @@ int hdmi_ti_4xx_check_aksv_data(struct hdmi_ip_data *ip_data)
 
 }
 EXPORT_SYMBOL(hdmi_ti_4xx_check_aksv_data);
+
+int hdmi_ti_4xx_cec_read_rx_cmd(struct hdmi_ip_data *ip_data,
+	struct cec_rx_data *rx_data)
+{
+	int rx_byte_cnt;
+	int temp;
+	int i;
+	int cec_cmd_cnt = 0;
+	int r = 0;
+
+	cec_cmd_cnt = REG_GET(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_RX_COUNT, 6, 4);
+
+	if (cec_cmd_cnt > 0) {
+		/*TODO:Check the RX error*/
+		/*Get the initiator and destination id*/
+		temp = hdmi_read_reg(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_RX_CMD_HEADER);
+		rx_data->init_device_id = FLD_GET(temp, 7, 4);
+		rx_data->dest_device_id = FLD_GET(temp, 3, 0);
+
+		/*get the command*/
+		r = hdmi_ti_4xx_cec_get_rx_cmd(ip_data, &rx_data->rx_cmd);
+		if (r) {
+			pr_err(KERN_ERR "RX Error in reading cmd\n");
+			goto error_exit;
+		}
+
+		/*Get the rx command operands*/
+		temp = hdmi_read_reg(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_RX_COUNT);
+		rx_byte_cnt = FLD_GET(temp, 3, 0);
+		rx_data->rx_count = rx_byte_cnt;
+		if (rx_data->rx_count > CEC_MAX_NUM_OPERANDS) {
+			pr_err(KERN_ERR "RX wrong num of operands\n");
+			r = -EINVAL;
+		} else {
+			for (i = 0; i < rx_byte_cnt; i++) {
+				temp = RD_REG_32(hdmi_core_cec_base(ip_data),
+					HDMI_CEC_RX_OPERAND + (i * 4));
+				rx_data->rx_operand[i] = FLD_GET(temp, 7, 0);
+			}
+		}
+
+		/* Clear the just read command */
+		REG_FLD_MOD(hdmi_core_cec_base(ip_data), HDMI_CEC_RX_CONTROL,
+			1, 0, 0);
+
+	} else {
+		/*No cmd in the FIFO return error*/
+		r = -EINVAL   ;
+	}
+
+error_exit:
+	return r;
+
+}
+EXPORT_SYMBOL(hdmi_ti_4xx_cec_read_rx_cmd);
+
+int hdmi_ti_4xx_cec_get_rx_cmd(struct hdmi_ip_data *ip_data,
+	char *rx_cmd)
+{
+	int temp;
+	int cec_cmd_cnt = 0;
+	int r = 0;
+
+	if (!ip_data)
+		return -ENODEV;
+
+	cec_cmd_cnt = REG_GET(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_RX_COUNT, 6, 4);
+
+	if (cec_cmd_cnt > 0) {
+		/*get the command*/
+		temp = hdmi_read_reg(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_RX_COMMAND);
+		*rx_cmd = FLD_GET(temp, 7, 0);
+		r = 0;
+	} else
+		r = -EINVAL;
+
+	return r;
+
+}
+EXPORT_SYMBOL(hdmi_ti_4xx_cec_get_rx_cmd);
+int hdmi_ti_4xx_cec_transmit_cmd(struct hdmi_ip_data *ip_data,
+	struct cec_tx_data *data, int *cmd_acked)
+{
+	int r = EINVAL;
+	u32 retry = HDMI_CORE_CEC_RETRY;
+	u32 temp, i = 0;
+
+	/* 1. Flush TX FIFO - required as change of initiator ID / destination
+	ID while TX is in progress could result in courrupted message.
+	2. Clear interrupt status registers for TX.
+	3. Set initiator Address, set retry count
+	4. Set Destination Address
+	5. Clear TX interrupt flags - if required
+	6. Set the command
+	7. Transmit
+	8. Check for NACK / ACK - report the same. */
+
+
+	/* Clear TX FIFO */
+	REG_FLD_MOD(hdmi_core_cec_base(ip_data), HDMI_CEC_DBG_3, 1, 7, 7);
+
+	while (retry) {
+		temp = hdmi_read_reg(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_DBG_3);
+		if (FLD_GET(temp, 7, 7) == 0)
+			break;
+		udelay(10);
+		retry--;
+	}
+	if (retry == 0x0) {
+		pr_err(KERN_ERR "Could not clear TX FIFO");
+		pr_err(KERN_ERR "\n FIFO Reset - retry  : %d - was %d\n",
+			retry, HDMI_CORE_CEC_RETRY);
+		goto error_exit;
+	}
+
+	/* Clear TX interrupts */
+	hdmi_write_reg(hdmi_core_cec_base(ip_data), HDMI_CEC_INT_STATUS_0,
+		HDMI_CEC_TX_FIFO_INT_MASK);
+
+	hdmi_write_reg(hdmi_core_cec_base(ip_data), HDMI_CEC_INT_STATUS_1,
+		HDMI_CEC_RETRANSMIT_CNT_INT_MASK);
+
+	/* Set the initiator addresses */
+	temp = hdmi_read_reg(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_TX_INIT);
+	temp = FLD_MOD(temp, data->initiator_device_id, 3, 0);
+	hdmi_write_reg(hdmi_core_cec_base(ip_data), HDMI_CEC_TX_INIT,
+		temp);
+
+	/*Set destination id*/
+	temp = hdmi_read_reg(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_TX_DEST);
+	temp = FLD_MOD(temp, data->dest_device_id, 3, 0);
+	hdmi_write_reg(hdmi_core_cec_base(ip_data), HDMI_CEC_TX_DEST,
+		temp);
+
+
+	/* Set the retry count */
+	REG_FLD_MOD(hdmi_core_cec_base(ip_data), HDMI_CEC_DBG_3,
+		data->retry_count, 6, 4);
+
+	if (data->send_ping)
+		goto send_ping;
+
+
+	/* Setup command and arguments for the command */
+	REG_FLD_MOD(hdmi_core_cec_base(ip_data), HDMI_CEC_TX_COMMAND,
+		data->tx_cmd, 7, 0);
+
+
+	for (i = 0; i < data->tx_count; i++) {
+		temp = RD_REG_32(hdmi_core_cec_base(ip_data),
+			(HDMI_CEC_TX_OPERAND + (i * 4)));
+		temp = FLD_MOD(temp, data->tx_operand[i], 7, 0);
+		WR_REG_32(hdmi_core_cec_base(ip_data),
+			(HDMI_CEC_TX_OPERAND + (i * 4)), temp);
+	}
+
+	/* Operand count */
+	REG_FLD_MOD(hdmi_core_cec_base(ip_data), HDMI_CEC_TRANSMIT_DATA,
+		data->tx_count, 3, 0);
+	/* Transmit */
+	REG_FLD_MOD(hdmi_core_cec_base(ip_data), HDMI_CEC_TRANSMIT_DATA,
+		0x1, 4, 4);
+
+	goto wait_for_ack_nack;
+
+send_ping:
+
+	REG_FLD_MOD(hdmi_core_cec_base(ip_data), HDMI_CEC_TX_DEST, 0x1, 7, 7);
+	/*Wait for reset*/
+	retry = HDMI_CORE_CEC_RETRY;
+	while (retry) {
+		if (!REG_GET(hdmi_core_cec_base(ip_data), HDMI_CEC_TX_DEST,
+			7, 7))
+			break;
+		udelay(10);
+		retry--;
+	}
+	if (retry == 0) {
+		pr_err(KERN_ERR "\nCould not send ping\n");
+		goto error_exit;
+	}
+
+wait_for_ack_nack:
+	pr_debug("cec_transmit_cmd wait for ack\n");
+	retry = HDMI_CEC_TX_CMD_RETRY;
+	*cmd_acked = -1;
+	do {
+		temp = hdmi_read_reg(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_INT_STATUS_0);
+		/* Look for TX change event */
+		if (FLD_GET(temp, 5, 5) != 0) {
+			*cmd_acked = 1;
+			/* Clear interrupt status */
+			REG_FLD_MOD(hdmi_core_cec_base(ip_data),
+				HDMI_CEC_INT_STATUS_0, 0x1, 5, 5);
+			if (FLD_GET(temp, 2, 2) != 0) {
+				/* Clear interrupt status */
+				REG_FLD_MOD(hdmi_core_cec_base(ip_data),
+					HDMI_CEC_INT_STATUS_0, 0x1, 2, 2);
+			}
+
+			r = 0;
+			break;
+		}
+		/* Wait for re-transmits to expire */
+		temp = hdmi_read_reg(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_INT_STATUS_1);
+		if (FLD_GET(temp, 1, 1) == 0) {
+			/* Wait for 7 mSecs - As per CEC protocol
+			nominal bit period is ~3 msec
+			delay of >= 3 bit period before next attempt
+			*/
+			mdelay(10);
+
+		} else {
+			/* Nacked ensure to clear the status */
+			temp = FLD_MOD(0x0, 1, 1, 1);
+			hdmi_write_reg(hdmi_core_cec_base(ip_data),
+				HDMI_CEC_INT_STATUS_1, temp);
+			*cmd_acked = 0;
+			r = 0;
+			break;
+		}
+		retry--;
+	} while (retry);
+
+	if (retry == 0x0) {
+		pr_err(KERN_ERR "\nCould not send\n");
+		pr_err(KERN_ERR "\nNo ack / nack sensed\n");
+		pr_err(KERN_ERR "\nResend did not complete in : %d\n",
+			((HDMI_CEC_TX_CMD_RETRY - retry) * 10));
+	}
+
+error_exit:
+
+	return r;
+}
+EXPORT_SYMBOL(hdmi_ti_4xx_cec_transmit_cmd);
+
+int hdmi_ti_4xxx_power_on_cec(struct hdmi_ip_data *ip_data)
+{
+	int temp;
+	int r = 0;
+	int retry = HDMI_CORE_CEC_RETRY;
+
+	/*Clear TX FIFO*/
+	REG_FLD_MOD(hdmi_core_cec_base(ip_data), HDMI_CEC_DBG_3, 0x1, 7, 7);
+	while (retry) {
+		temp = hdmi_read_reg(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_DBG_3);
+		if (FLD_GET(temp, 7, 7) == 0)
+			break;
+		retry--;
+	}
+	if (retry == 0x0) {
+		pr_err(KERN_ERR "Could not clear TX FIFO");
+		r = -EBUSY;
+		goto error_exit;
+	}
+
+	/*Clear RX FIFO*/
+	hdmi_write_reg(hdmi_core_cec_base(ip_data), HDMI_CEC_RX_CONTROL, 0x3);
+	retry = HDMI_CORE_CEC_RETRY;
+	while (retry) {
+		temp = hdmi_read_reg(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_RX_CONTROL);
+		if (FLD_GET(temp, 1, 0) == 0)
+			break;
+		retry--;
+	}
+	if (retry == 0x0) {
+		pr_err(KERN_ERR "Could not clear RX FIFO");
+		r = -EBUSY;
+		goto error_exit;
+	}
+
+	/*Clear CEC interrupts*/
+	hdmi_write_reg(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_INT_STATUS_1,
+		hdmi_read_reg(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_INT_STATUS_1));
+	hdmi_write_reg(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_INT_STATUS_0,
+		hdmi_read_reg(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_INT_STATUS_0));
+
+	/*Enable HDMI core interrupts*/
+
+	REG_FLD_MOD(hdmi_wp_base(ip_data), HDMI_WP_IRQENABLE_SET, 0x1,
+		0, 0);
+
+
+	REG_FLD_MOD(hdmi_core_sys_base(ip_data), HDMI_CORE_SYS_UMASK4, 0x1, 3,
+		3);
+
+	/*Enable CEC interrupts*/
+	/*command being received event*/
+	REG_FLD_MOD(hdmi_core_cec_base(ip_data), HDMI_CEC_INT_ENABLE_0, 0x1, 0,
+		0);
+
+	/*RX fifo not empty event*/
+	REG_FLD_MOD(hdmi_core_cec_base(ip_data), HDMI_CEC_INT_ENABLE_0, 0x1, 1,
+		1);
+
+
+	/*Initialize CEC clock divider*/
+	/*CEC needs 2MHz clock hence set the devider to 24 to get
+	48/24=2MHz clock*/
+	REG_FLD_MOD(hdmi_wp_base(ip_data), HDMI_WP_WP_CLK, 0x18, 5, 0);
+
+	/*Remove BYpass mode*/
+
+	temp = hdmi_read_reg(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_SETUP);
+	if (FLD_GET(temp, 4, 4) != 0) {
+		temp = FLD_MOD(temp, 0, 4, 4);
+		hdmi_write_reg(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_SETUP, temp);
+
+		/* If we enabled CEC in middle of a CEC messages on CEC n/w,
+		we could have start bit irregularity and/or short
+		pulse event. Clear them now */
+		temp = hdmi_read_reg(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_INT_STATUS_1);
+		temp = FLD_MOD(0x0, 0x5, 2, 0);
+		hdmi_write_reg(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_INT_STATUS_1, temp);
+	}
+	return 0;
+error_exit:
+	return r;
+}
+EXPORT_SYMBOL(hdmi_ti_4xxx_power_on_cec);
+
+int hdmi_ti_4xxx_cec_get_rx_int(struct hdmi_ip_data *ip_data)
+{
+	u32 cec_rx = 0;
+
+	cec_rx = REG_GET(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_INT_STATUS_0, 1, 0);
+	return cec_rx;
+}
+EXPORT_SYMBOL(hdmi_ti_4xxx_cec_get_rx_int);
+
+int hdmi_ti_4xxx_cec_clr_rx_int(struct hdmi_ip_data *ip_data, int cec_rx)
+{
+	/*clear CEC RX interrupts*/
+	REG_FLD_MOD(hdmi_core_cec_base(ip_data), HDMI_CEC_INT_STATUS_0, cec_rx,
+		1, 0);
+	return 0;
+}
+EXPORT_SYMBOL(hdmi_ti_4xxx_cec_clr_rx_int);
+
+int hdmi_ti_4xxx_cec_get_listening_mask(struct hdmi_ip_data *ip_data)
+{
+	int dev_mask = 0;
+
+	/*Store current device listning ids*/
+	dev_mask = RD_REG_32(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_CA_15_8);
+	dev_mask <<= 8;
+	dev_mask |= RD_REG_32(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_CA_7_0);
+	return dev_mask;
+
+}
+EXPORT_SYMBOL(hdmi_ti_4xxx_cec_get_listening_mask);
+
+int hdmi_ti_4xxx_cec_add_listening_device(struct hdmi_ip_data *ip_data,
+	int device_id, int clear)
+{
+	u32 temp, regis_reg, shift_cnt;
+
+	/* Register to receive messages intended for this device
+		and broad cast messages */
+	regis_reg = HDMI_CEC_CA_7_0;
+	shift_cnt = device_id;
+	temp = 0;
+	if (device_id > 0x7) {
+		regis_reg = HDMI_CEC_CA_15_8;
+		shift_cnt -= 0x7;
+	}
+	if (clear == 0x1) {
+		WR_REG_32(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_CA_7_0, 0);
+		WR_REG_32(hdmi_core_cec_base(ip_data),
+			HDMI_CEC_CA_15_8, 0);
+	} else {
+		temp = RD_REG_32(hdmi_core_cec_base(ip_data), regis_reg);
+	}
+	temp |= 0x1 << shift_cnt;
+	WR_REG_32(hdmi_core_cec_base(ip_data), regis_reg,
+		temp);
+	return 0;
+
+}
+EXPORT_SYMBOL(hdmi_ti_4xxx_cec_add_listening_device);
+
+int hdmi_ti_4xxx_cec_set_listening_mask(struct hdmi_ip_data *ip_data, int mask)
+{
+	WR_REG_32(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_CA_15_8, (mask >> 8) & 0xff);
+	WR_REG_32(hdmi_core_cec_base(ip_data),
+		HDMI_CEC_CA_7_0, mask & 0xff);
+	return 0;
+}
+EXPORT_SYMBOL(hdmi_ti_4xxx_cec_set_listening_mask);
 
 static int __init hdmi_ti_4xxx_init(void)
 {
